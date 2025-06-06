@@ -1,17 +1,24 @@
 from fastapi import FastAPI, HTTPException , Request,Form
-from pydantic import BaseModel, Field, computed_field ,field_validator
-from typing import Optional, List, Literal, Annotated, Dict
-import json
-import pickle
 import pandas as pd
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
+from schema.user_input import UserInput
+from model.predict import MODEL_VERSION, predict_output,model
+from schema.prediction_response import PredictionResponse
+import logging
+
+# Configure logging
+logging.basicConfig(
+    filename="app.log",
+    filemode="a",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
-
-with open("insurance_pipeline.pkl", "rb") as file:
-    model = pickle.load(file)
 
 # Allow CORS if frontend is separate
 app.add_middleware(
@@ -27,36 +34,39 @@ templates = Jinja2Templates(directory="templates")
 # Show form at root
 @app.get("/", response_class=HTMLResponse)
 def get_form(request: Request):
+    logger.info("Rendering index.html")
     return templates.TemplateResponse("index.html", {"request": request})
 
-class UserInput(BaseModel):
-    age: Annotated[int, Field(..., gt = 0,lt = 100, title="Age of the User", description="Age should be between 1 and 99", example=30)]
-    sex: Annotated[Literal["male","female"], Field(..., title = "Sex of the User", description = "Either Male or Female")]
-    Height: Annotated[float, Field(..., gt = 0, title="Height of the User", description="Height in meters", example=1.75)]
-    Weight: Annotated[float, Field(..., gt = 0, title="Weight of the User", description="Weight in kilograms", example=70.5)]
-    children: Annotated[int, Field(..., ge = 0, le = 5, title="Number of Children", description="Number of children the user has", example=2)]
-    smoker: Annotated[Literal["yes", "no"], Field(..., title="Smoking Status", description="Whether the user is a smoker or not", example="no")]
-    region: Annotated[Literal["northeast", "northwest", "southeast", "southwest"], Field(..., title="Region", description="Geographical region of the user", example="northeast")]
+@app.get("/health")
+def health_check():
+    logger.info("Health check endpoint called")
+    if model is None:
+        logger.error("Model is not loaded")
+        return JSONResponse(
+            content={"status": "ERROR", "message": "Model not loaded"},
+            status_code=500
+        )
+    return{
+        "status": "OK",
+        "message": "API is running smoothly",
+        "version": MODEL_VERSION,
+        "model_loaded": True if model else False
+    }
 
-    @computed_field
-    @property
-    def bmi(self) -> float:
-        bmi = round(self.Weight / (self.Height ** 2), 2)
-        return bmi
-    @field_validator("sex", "smoker", "region", mode="before")
-    @classmethod
-    def lowercase_strings(cls, v):
-        return v.lower()
 
-@app.post("/predict")
+
+@app.post("/predict", response_model=PredictionResponse)
 def predict_insurance_cost(data: UserInput):
     try:
+        logger.info(f"Received data for prediction: {data.model_dump()}")
         df = pd.DataFrame([data.model_dump()])
         df['bmi'] = data.bmi
         df = df.drop(columns=["Height", "Weight"])
-        prediction = model.predict(df)
+        prediction = predict_output(df)
+        logger.info(f"Prediction made: {prediction[0]}")
         return JSONResponse(content={"predicted_cost": float(prediction[0])},status_code=200)
     except Exception as e:
+        logger.error(f"Error during prediction: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
     
     
